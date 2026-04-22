@@ -1,9 +1,8 @@
 """
-BITUNIX AI TRADING BOT + TELEGRAM - FULLY FIXED VERSION
-All commands working: /status /balance /price /stop /start /help
+BITUNIX AI TRADING BOT + TELEGRAM
+Fixed signature: SHA256(SHA256(nonce+ts+key+query+body) + secret)
 """
 import hashlib
-import hmac
 import json
 import logging
 import os
@@ -30,6 +29,31 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# ─── CORRECT BITUNIX SIGNATURE ───────────────────────────────────────────────
+def sha256_hex(s):
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+def make_sign(nonce, ts, query="", body=""):
+    api_key    = os.environ.get("BITUNIX_API_KEY", "")
+    secret_key = os.environ.get("BITUNIX_SECRET_KEY", "")
+    # Step 1: digest = SHA256(nonce + timestamp + api_key + queryParams + body)
+    digest = sha256_hex(nonce + ts + api_key + query + body)
+    # Step 2: sign = SHA256(digest + secretKey)
+    sign   = sha256_hex(digest + secret_key)
+    return sign
+
+def make_headers(query="", body=""):
+    api_key = os.environ.get("BITUNIX_API_KEY", "")
+    nonce   = uuid.uuid4().hex[:32]
+    ts      = str(int(time.time() * 1000))
+    return {
+        "api-key"      : api_key,
+        "nonce"        : nonce,
+        "timestamp"    : ts,
+        "sign"         : make_sign(nonce, ts, query, body),
+        "Content-Type" : "application/json"
+    }
+
 # ─── TELEGRAM ────────────────────────────────────────────────────────────────
 def send_telegram(message):
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -52,24 +76,7 @@ def send_telegram(message):
         log.error(f"Telegram exception: {e}")
         return False
 
-# ─── BITUNIX API HELPERS ─────────────────────────────────────────────────────
-def make_headers(query="", body=""):
-    """Build signed Bitunix headers — always reads fresh from env."""
-    api_key    = os.environ.get("BITUNIX_API_KEY", "")
-    secret_key = os.environ.get("BITUNIX_SECRET_KEY", "")
-    nonce      = uuid.uuid4().hex
-    ts         = str(int(time.time() * 1000))
-    raw        = nonce + ts + api_key + query + body
-    digest     = hashlib.sha256(raw.encode()).hexdigest()
-    signature  = hmac.new(secret_key.encode(), digest.encode(), hashlib.sha256).hexdigest()
-    return {
-        "api-key"      : api_key,
-        "nonce"        : nonce,
-        "timestamp"    : ts,
-        "sign"         : signature,
-        "Content-Type" : "application/json"
-    }
-
+# ─── BITUNIX API ─────────────────────────────────────────────────────────────
 def get_balance():
     try:
         r = requests.get(
@@ -77,45 +84,54 @@ def get_balance():
             headers=make_headers(),
             timeout=10
         )
-        log.info(f"Balance raw: {r.status_code} {r.text}")
+        log.info(f"Balance response: {r.status_code} {r.text}")
         data = r.json()
-        # Try different response structures
         if data.get("data") is None:
-            log.error(f"Full response: {data}")
+            log.error(f"Balance API error: {data.get('msg')}")
             return 0.0
-        inner = data.get("data", {})
-        # Structure 1: data.assets[]
-        assets = inner.get("assets", [])
-        # Structure 2: data directly has available
-        if not assets:
-            usdt = inner.get("available", None)
-            if usdt:
-                return float(usdt)
-        for a in assets:
-            if a.get("currency", "").upper() == "USDT":
-                return float(a.get("available", 0))
+        for asset in data["data"].get("assets", []):
+            if asset.get("currency", "").upper() == "USDT":
+                return float(asset.get("available", 0))
         return 0.0
     except Exception as e:
-        log.error(f"Balance error: {e}")
+        log.error(f"get_balance error: {e}")
         return 0.0
 
 def get_price(symbol):
-    q = f"symbols={symbol}"
-    r = requests.get(f"{BASE_URL}/api/v1/futures/market/tickers?{q}",
-                     headers=make_headers(query=q), timeout=10)
-    r.raise_for_status()
-    data = r.json().get("data", [])
-    if data:
-        return float(data[0]["lastPrice"])
-    raise ValueError(f"No ticker data for {symbol}")
+    try:
+        q = f"symbols={symbol}"
+        r = requests.get(
+            f"{BASE_URL}/api/v1/futures/market/tickers?{q}",
+            headers=make_headers(query=q),
+            timeout=10
+        )
+        log.info(f"Price response: {r.status_code} {r.text}")
+        data = r.json().get("data", [])
+        if data:
+            return float(data[0]["lastPrice"])
+        raise ValueError(f"No ticker for {symbol}")
+    except Exception as e:
+        log.error(f"get_price error: {e}")
+        raise
 
 def set_leverage(symbol, leverage):
-    body = json.dumps({"symbol": symbol, "leverage": leverage}, separators=(",", ":"))
-    requests.post(f"{BASE_URL}/api/v1/futures/leverage",
-                  headers=make_headers(body=body), data=body, timeout=10)
+    try:
+        body = json.dumps(
+            {"symbol": symbol, "leverage": leverage},
+            separators=(",", ":")
+        )
+        r = requests.post(
+            f"{BASE_URL}/api/v1/futures/account/change_leverage",
+            headers=make_headers(body=body),
+            data=body,
+            timeout=10
+        )
+        log.info(f"Leverage response: {r.status_code} {r.text}")
+    except Exception as e:
+        log.error(f"set_leverage error: {e}")
 
 def place_order(symbol, side, qty, tp, sl):
-    body = json.dumps({
+    payload = {
         "symbol"    : symbol,
         "side"      : side.upper(),
         "orderType" : "MARKET",
@@ -126,20 +142,30 @@ def place_order(symbol, side, qty, tp, sl):
         "tpStopType": "MARK_PRICE",
         "slStopType": "MARK_PRICE",
         "clientId"  : uuid.uuid4().hex,
-    }, separators=(",", ":"))
-    r = requests.post(f"{BASE_URL}/api/v1/futures/order/place_order",
-                      headers=make_headers(body=body), data=body, timeout=10)
+    }
+    body = json.dumps(payload, separators=(",", ":"))
+    log.info(f"Placing order: {body}")
+    r = requests.post(
+        f"{BASE_URL}/api/v1/futures/trade/place_order",
+        headers=make_headers(body=body),
+        data=body,
+        timeout=10
+    )
+    log.info(f"Order response: {r.status_code} {r.text}")
     r.raise_for_status()
     return r.json()
 
-# ─── DUPLICATE GUARD ──────────────────────────────────────────────────────────
+# ─── DUPLICATE GUARD ─────────────────────────────────────────────────────────
 last_signals = {}
+signals_lock = threading.Lock()
+
 def is_duplicate(symbol, action):
     key = f"{symbol}_{action}"
     now = time.time()
-    if key in last_signals and (now - last_signals[key]) < 60:
-        return True
-    last_signals[key] = now
+    with signals_lock:
+        if key in last_signals and (now - last_signals[key]) < 60:
+            return True
+        last_signals[key] = now
     return False
 
 # ─── EXECUTE TRADE ────────────────────────────────────────────────────────────
@@ -149,13 +175,16 @@ def execute_trade(symbol, action):
     action = action.lower()
 
     if not BOT_ACTIVE:
-        send_telegram(f"⚠️ Signal received but bot is STOPPED\n{action.upper()} {symbol}")
         return {"status": "blocked", "reason": "Bot stopped"}
 
     price   = get_price(symbol)
     balance = get_balance()
-    qty     = round((balance * RISK_PERC * LEVERAGE) / price, 4)
+    log.info(f"Trade: {action} {symbol} price={price} balance={balance}")
 
+    if balance < 1:
+        raise ValueError(f"Balance too low: ${balance:.2f}")
+
+    qty = round((balance * RISK_PERC * LEVERAGE) / price, 4)
     if qty <= 0:
         raise ValueError(f"Qty too small: {qty}")
 
@@ -185,62 +214,49 @@ def execute_trade(symbol, action):
     log.info(f"✅ Trade done: {side} {qty} {symbol} @ {price}")
     return result
 
-# ─── TELEGRAM POLLING ─────────────────────────────────────────────────────────
+# ─── TELEGRAM POLLING ────────────────────────────────────────────────────────
 def telegram_polling():
     global BOT_ACTIVE
     offset = 0
     log.info("🤖 Telegram polling started!")
-
     send_telegram(
         "🚀 <b>Bitunix Bot is ONLINE!</b>\n"
         f"SL: {SL_PERC*100}% | TP: {SL_PERC*RR*100:.2f}%\n"
         f"Leverage: {LEVERAGE}x | Risk: {RISK_PERC*100:.0f}%\n"
         "Send /help to see all commands"
     )
-
     while True:
         try:
             token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
             chat  = os.environ.get("TELEGRAM_CHAT_ID", "")
-
             if not token:
-                log.error("❌ TELEGRAM_BOT_TOKEN missing!")
                 time.sleep(10)
                 continue
-
             r = requests.get(
                 f"https://api.telegram.org/bot{token}/getUpdates",
                 params={"offset": offset, "timeout": 10},
                 timeout=15
             )
-
             if not r.ok:
                 time.sleep(5)
                 continue
-
             for update in r.json().get("result", []):
                 offset    = update["update_id"] + 1
                 msg       = update.get("message", {})
                 text      = msg.get("text", "").strip().lower()
                 from_chat = str(msg.get("chat", {}).get("id", ""))
-
-                log.info(f"TG from {from_chat}: {text}")
-
                 if from_chat != str(chat):
                     continue
-
                 if text in ("/start", "start"):
                     BOT_ACTIVE = True
-                    send_telegram("🟢 <b>Bot STARTED!</b> Ready to trade.\nSend /help for commands.")
-
+                    send_telegram("🟢 <b>Bot STARTED!</b> Ready to trade.")
                 elif text == "/stop":
                     BOT_ACTIVE = False
-                    send_telegram("🔴 <b>Bot STOPPED</b>\nNo trades will be placed.\nSend /start to resume.")
-
+                    send_telegram("🔴 <b>Bot STOPPED!</b> Send /start to resume.")
                 elif text == "/help":
                     send_telegram(
                         "🤖 <b>Bitunix Bot Commands</b>\n"
-                        "━━━━━━━━━━━━━━━━\n"
+                        "━━━━━━━━━━━━━━\n"
                         "/status  — Bot status\n"
                         "/balance — USDT balance\n"
                         "/price   — BTC price\n"
@@ -248,42 +264,36 @@ def telegram_polling():
                         "/start   — Start trading\n"
                         "/help    — This menu"
                     )
-
                 elif text == "/status":
                     try:
                         bal = get_balance()
                         send_telegram(
                             f"🤖 <b>Bot Status</b>\n"
                             f"━━━━━━━━━━━━\n"
-                            f"Status:   {'🟢 RUNNING' if BOT_ACTIVE else '🔴 STOPPED'}\n"
+                            f"{'🟢 RUNNING' if BOT_ACTIVE else '🔴 STOPPED'}\n"
                             f"Balance:  <b>${bal:,.2f} USDT</b>\n"
                             f"Leverage: {LEVERAGE}x\n"
-                            f"Risk:     {RISK_PERC*100:.0f}%/trade\n"
-                            f"SL: {SL_PERC*100}% | TP: {SL_PERC*RR*100:.2f}%"
+                            f"Risk:     {RISK_PERC*100:.0f}%/trade"
                         )
                     except Exception as e:
                         send_telegram(f"⚠️ Status error: {str(e)[:100]}")
-
                 elif text == "/balance":
                     try:
                         bal = get_balance()
                         send_telegram(f"💼 Balance: <b>${bal:,.2f} USDT</b>")
                     except Exception as e:
                         send_telegram(f"⚠️ Balance error: {str(e)[:100]}")
-
                 elif text == "/price":
                     try:
                         p = get_price("BTCUSDT")
                         send_telegram(f"₿ BTC/USDT: <b>${p:,.2f}</b>")
                     except Exception as e:
                         send_telegram(f"⚠️ Price error: {str(e)[:100]}")
-
         except Exception as e:
             log.error(f"Polling error: {e}")
-
         time.sleep(2)
 
-# ─── FLASK ────────────────────────────────────────────────────────────────────
+# ─── FLASK APP ────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 
 @app.route("/webhook", methods=["POST"])
@@ -292,7 +302,7 @@ def webhook():
         data   = request.get_json(force=True)
         action = data.get("action", "").lower()
         symbol = data.get("symbol", "BTCUSDT").upper()
-        log.info(f"📡 {action.upper()} {symbol}")
+        log.info(f"📡 Webhook: {action.upper()} {symbol}")
         if action not in ("buy", "sell"):
             return jsonify({"error": "unknown action"}), 400
         if is_duplicate(symbol, action):
@@ -311,11 +321,11 @@ def webhook():
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
-        "status"         : "Bitunix Bot Running 🚀",
-        "bot_active"     : BOT_ACTIVE,
-        "telegram_token" : "SET ✅" if os.environ.get("TELEGRAM_BOT_TOKEN") else "MISSING ❌",
-        "telegram_chat"  : "SET ✅" if os.environ.get("TELEGRAM_CHAT_ID")   else "MISSING ❌",
-        "bitunix_key"    : "SET ✅" if os.environ.get("BITUNIX_API_KEY")    else "MISSING ❌",
+        "status"      : "Bitunix Bot Running 🚀",
+        "bot_active"  : BOT_ACTIVE,
+        "bitunix_key" : "SET ✅" if os.environ.get("BITUNIX_API_KEY") else "MISSING ❌",
+        "tg_token"    : "SET ✅" if os.environ.get("TELEGRAM_BOT_TOKEN") else "MISSING ❌",
+        "tg_chat"     : "SET ✅" if os.environ.get("TELEGRAM_CHAT_ID") else "MISSING ❌",
     })
 
 @app.route("/health", methods=["GET"])
@@ -324,8 +334,21 @@ def health():
 
 @app.route("/test_telegram", methods=["GET"])
 def test_tg():
-    ok = send_telegram("🧪 Test from Bitunix Bot — working!")
+    ok = send_telegram("🧪 Test from Bitunix Bot!")
     return jsonify({"sent": ok})
+
+@app.route("/test_balance", methods=["GET"])
+def test_balance():
+    bal = get_balance()
+    return jsonify({"balance": bal})
+
+@app.route("/test_price", methods=["GET"])
+def test_price():
+    try:
+        p = get_price("BTCUSDT")
+        return jsonify({"price": p})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
@@ -342,4 +365,4 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
-        
+    
