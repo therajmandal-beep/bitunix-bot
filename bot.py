@@ -75,31 +75,28 @@ def send_trade_alert(action, symbol, price, qty, tp, sl, balance):
 
 # ─── BITUNIX API ──────────────────────────────────────────────────────────────
 def _sign(nonce, ts, query="", body=""):
-    key    = os.environ.get("BITUNIX_API_KEY", "")
     secret = os.environ.get("BITUNIX_SECRET_KEY", "")
-    digest = hashlib.sha256((nonce + ts + key + query + body).encode()).hexdigest()
-    return hmac.new(secret.encode(), digest.encode(), hashlib.sha256).hexdigest()
-
-def _headers(query="", body=""):
-    key   = os.environ.get("BITUNIX_API_KEY", "")
-    nonce = uuid.uuid4().hex
-    ts    = str(int(time.time() * 1000))
-    return {
-        "api-key"      : key,
-        "nonce"        : nonce,
-        "timestamp"    : ts,
-        "sign"         : _sign(nonce, ts, query, body),
-        "Content-Type" : "application/json"
-    }
+    key    = os.environ.get("BITUNIX_API_KEY", "")
+    raw    = nonce + ts + key + query + body
+    digest = hashlib.sha256(raw.encode()).hexdigest()
+    sign   = hmac.new(
+        secret.encode(),
+        digest.encode(),
+        hashlib.sha256
+    ).hexdigest()
+    log.info(f"Sign input: nonce={nonce} ts={ts} query={query} body={body}")
+    log.info(f"Digest: {digest}")
+    log.info(f"Sign: {sign}")
+    return sign
 
 def get_balance():
     r = requests.get(f"{BASE_URL}/api/v1/futures/account", headers=_headers())
+    log.info(f"Balance response: {r.status_code} {r.text}")
     r.raise_for_status()
     for a in r.json().get("data", {}).get("assets", []):
         if a.get("currency", "").upper() == "USDT":
             return float(a.get("available", 0))
     return 0.0
-
 def get_price(symbol):
     q = f"symbols={symbol}"
     r = requests.get(f"{BASE_URL}/api/v1/futures/market/tickers?{q}", headers=_headers(query=q))
