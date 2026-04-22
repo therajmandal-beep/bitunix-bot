@@ -1,10 +1,6 @@
 """
-╔══════════════════════════════════════════════════════════════╗
-║   BITUNIX AI TRADING BOT + TELEGRAM — RAILWAY VERSION       ║
-║   Runs 24/7 on Railway cloud — no PC needed!                ║
-╚══════════════════════════════════════════════════════════════╝
+BITUNIX AI TRADING BOT + TELEGRAM - FIXED VERSION
 """
-
 import hashlib
 import hmac
 import json
@@ -14,14 +10,13 @@ import time
 import uuid
 import threading
 from datetime import datetime
-
 import requests
 from flask import Flask, request, jsonify
 
 # ─── KEYS FROM RAILWAY ENVIRONMENT VARIABLES ─────────────────────────────────
 BITUNIX_API_KEY    = os.environ.get("4305043dfc9bf65857f86d215b3cbd1c",    "")
 BITUNIX_SECRET_KEY = os.environ.get("136027f1d25dad59f3350426c9965d68", "")
-TELEGRAM_BOT_TOKEN = os.environ.get("8219770240:AAG0l89QA39RPlilYxyJCVQtsGmR5ZoF5Jc", "")
+TELEGRAM_BOT_TOKEN = os.environ.get("8712205632:AAGM2HstEIuz_ttIHBaMwkPILER5uNAf2l0", "")
 TELEGRAM_CHAT_ID   = os.environ.get("1256115118",   "")
 
 # ─── BOT SETTINGS ────────────────────────────────────────────────────────────
@@ -42,15 +37,28 @@ log = logging.getLogger(__name__)
 
 # ─── TELEGRAM ────────────────────────────────────────────────────────────────
 def send_telegram(message: str):
-    if not TELEGRAM_BOT_TOKEN: return
+    """Send message to Telegram."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat  = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if not token or not chat:
+        log.warning(f"Telegram not configured! TOKEN={bool(token)} CHAT={bool(chat)}")
+        return False
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"},
-            timeout=5
-        )
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        r   = requests.post(url, json={
+            "chat_id"    : chat,
+            "text"       : message,
+            "parse_mode" : "HTML"
+        }, timeout=10)
+        if r.ok:
+            log.info("✅ Telegram message sent!")
+            return True
+        else:
+            log.error(f"Telegram failed: {r.text}")
+            return False
     except Exception as e:
         log.error(f"Telegram error: {e}")
+        return False
 
 def send_trade_alert(action, symbol, price, qty, tp, sl, balance):
     emoji = "🟢 BUY" if action == "buy" else "🔴 SELL"
@@ -59,47 +67,29 @@ def send_trade_alert(action, symbol, price, qty, tp, sl, balance):
         f"━━━━━━━━━━━━━━\n"
         f"💰 Price:   <b>${price:,.2f}</b>\n"
         f"📦 Qty:     <b>{qty:.4f}</b>\n"
-        f"🎯 TP:      <b>${tp:,.2f}</b> (+{SL_PERC*RR*100:.2f}%)\n"
-        f"🛑 SL:      <b>${sl:,.2f}</b> (-{SL_PERC*100:.1f}%)\n"
+        f"🎯 TP:      <b>${tp:,.2f}</b>\n"
+        f"🛑 SL:      <b>${sl:,.2f}</b>\n"
         f"💼 Balance: <b>${balance:,.2f} USDT</b>\n"
-        f"⏰ Time:    {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
+        f"⏰ {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
     )
-
-# ─── AI AGENT ────────────────────────────────────────────────────────────────
-def ai_should_trade(action, symbol):
-    score, reasons = 0, []
-    try:
-        balance = get_balance()
-        if balance >= 50:
-            score += 1; reasons.append(f"Balance OK (${balance:.2f})")
-        else:
-            return False, f"Balance too low (${balance:.2f})"
-        if BOT_ACTIVE:
-            score += 1; reasons.append("Bot active ✓")
-        else:
-            return False, "Bot is stopped"
-        q = f"symbols={symbol}"
-        r = requests.get(f"{BASE_URL}/api/v1/futures/market/tickers?{q}",
-                         headers=_headers(query=q), timeout=5)
-        if r.ok:
-            chg = float(r.json().get("data", [{}])[0].get("priceChangePercent", 0))
-            if (action == "buy" and chg > -5) or (action == "sell" and chg < 5):
-                score += 1; reasons.append(f"24h change OK ({chg:+.1f}%)")
-        return (score >= 2), " | ".join(reasons)
-    except Exception as e:
-        return True, f"AI check error: {e}"
 
 # ─── BITUNIX API ──────────────────────────────────────────────────────────────
 def _sign(nonce, ts, query="", body=""):
-    digest = hashlib.sha256((nonce + ts + BITUNIX_API_KEY + query + body).encode()).hexdigest()
-    return hmac.new(BITUNIX_SECRET_KEY.encode(), digest.encode(), hashlib.sha256).hexdigest()
+    key    = os.environ.get("BITUNIX_API_KEY", "")
+    secret = os.environ.get("BITUNIX_SECRET_KEY", "")
+    digest = hashlib.sha256((nonce + ts + key + query + body).encode()).hexdigest()
+    return hmac.new(secret.encode(), digest.encode(), hashlib.sha256).hexdigest()
 
 def _headers(query="", body=""):
+    key   = os.environ.get("BITUNIX_API_KEY", "")
     nonce = uuid.uuid4().hex
     ts    = str(int(time.time() * 1000))
     return {
-        "api-key": BITUNIX_API_KEY, "nonce": nonce, "timestamp": ts,
-        "sign": _sign(nonce, ts, query, body), "Content-Type": "application/json"
+        "api-key"      : key,
+        "nonce"        : nonce,
+        "timestamp"    : ts,
+        "sign"         : _sign(nonce, ts, query, body),
+        "Content-Type" : "application/json"
     }
 
 def get_balance():
@@ -150,14 +140,14 @@ def execute_trade(symbol, action):
     global BOT_ACTIVE
     symbol = symbol.upper()
     action = action.lower()
-    ok, reason = ai_should_trade(action, symbol)
-    log.info(f"AI: {reason}")
-    if not ok:
-        send_telegram(f"⚠️ <b>Trade BLOCKED</b>\n{symbol} {action.upper()}\n{reason}")
-        return {"status": "blocked", "reason": reason}
+
+    if not BOT_ACTIVE:
+        return {"status": "blocked", "reason": "Bot is stopped"}
+
     price   = get_price(symbol)
     balance = get_balance()
     qty     = round((balance * RISK_PERC * LEVERAGE) / price, 4)
+
     if action == "buy":
         side = "BUY"
         sl   = round(price * (1 - SL_PERC), 2)
@@ -166,63 +156,112 @@ def execute_trade(symbol, action):
         side = "SELL"
         sl   = round(price * (1 + SL_PERC), 2)
         tp   = round(price * (1 - SL_PERC * RR), 2)
+
     set_leverage(symbol, LEVERAGE)
     result = place_order(symbol, side, qty, tp, sl)
     send_trade_alert(action, symbol, price, qty, tp, sl, balance)
     log.info(f"✅ Trade: {side} {qty} {symbol} @ {price}")
     return result
 
-# ─── TELEGRAM COMMANDS ────────────────────────────────────────────────────────
-def handle_telegram_commands():
+# ─── TELEGRAM COMMAND HANDLER ─────────────────────────────────────────────────
+def telegram_polling():
+    """Poll Telegram for commands."""
     global BOT_ACTIVE
-    if not TELEGRAM_BOT_TOKEN: return
     offset = 0
-    log.info("Telegram listening...")
+    log.info("🤖 Telegram polling STARTED!")
+
+    # Send startup message
+    send_telegram(
+        "🚀 <b>Bitunix Bot is ONLINE!</b>\n"
+        f"SL: {SL_PERC*100}% | TP: {SL_PERC*RR*100:.2f}%\n"
+        f"Leverage: {LEVERAGE}x | Risk: {RISK_PERC*100:.0f}%\n"
+        "Send /help to see commands"
+    )
+
     while True:
         try:
-            r = requests.get(
-                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
-                params={"offset": offset, "timeout": 10}, timeout=15
-            )
-            for update in r.json().get("result", []):
+            token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+            chat  = os.environ.get("TELEGRAM_CHAT_ID", "")
+            if not token:
+                log.error("❌ TELEGRAM_BOT_TOKEN is empty!")
+                time.sleep(10)
+                continue
+
+            url = f"https://api.telegram.org/bot{token}/getUpdates"
+            r   = requests.get(url, params={"offset": offset, "timeout": 10}, timeout=15)
+
+            if not r.ok:
+                log.error(f"Telegram getUpdates failed: {r.status_code}")
+                time.sleep(5)
+                continue
+
+            updates = r.json().get("result", [])
+            for update in updates:
                 offset = update["update_id"] + 1
                 msg    = update.get("message", {})
                 text   = msg.get("text", "").strip().lower()
-                chat   = str(msg.get("chat", {}).get("id", ""))
-                if chat != str(TELEGRAM_CHAT_ID): continue
-                if text == "/status":
-                    bal = get_balance()
-                    send_telegram(
-                        f"🤖 <b>Bot Status</b>\n"
-                        f"Status: {'🟢 RUNNING' if BOT_ACTIVE else '🔴 STOPPED'}\n"
-                        f"Balance: <b>${bal:,.2f} USDT</b>\n"
-                        f"Leverage: {LEVERAGE}x | Risk: {RISK_PERC*100:.0f}%"
-                    )
-                elif text == "/balance":
-                    send_telegram(f"💼 Balance: <b>${get_balance():,.2f} USDT</b>")
-                elif text == "/price":
-                    send_telegram(f"₿ BTC: <b>${get_price('BTCUSDT'):,.2f}</b>")
-                elif text == "/stop":
-                    BOT_ACTIVE = False
-                    send_telegram("🔴 <b>Bot STOPPED</b> — send /start to resume")
-                elif text == "/start":
+                from_chat = str(msg.get("chat", {}).get("id", ""))
+
+                log.info(f"TG message from {from_chat}: {text}")
+
+                # Only respond to your chat
+                if from_chat != str(chat):
+                    log.warning(f"Ignored message from unknown chat: {from_chat}")
+                    continue
+
+                if text in ("/start", "start"):
                     BOT_ACTIVE = True
-                    send_telegram("🟢 <b>Bot STARTED</b> — ready to trade!")
+                    send_telegram("🟢 <b>Bot STARTED!</b> Ready to trade.\nSend /help for commands.")
+
                 elif text == "/help":
                     send_telegram(
-                        "🤖 <b>Commands</b>\n"
+                        "🤖 <b>Bitunix Bot Commands</b>\n"
+                        "━━━━━━━━━━━━━━━━\n"
                         "/status  — Bot status\n"
                         "/balance — USDT balance\n"
                         "/price   — BTC price\n"
-                        "/stop    — Stop bot\n"
-                        "/start   — Start bot\n"
+                        "/stop    — Stop trading\n"
+                        "/start   — Start trading\n"
                         "/help    — This menu"
                     )
-        except Exception as e:
-            log.error(f"TG error: {e}")
-        time.sleep(3)
 
-# ─── FLASK ────────────────────────────────────────────────────────────────────
+                elif text == "/status":
+                    try:
+                        bal = get_balance()
+                        send_telegram(
+                            f"🤖 <b>Bot Status</b>\n"
+                            f"Status:   {'🟢 RUNNING' if BOT_ACTIVE else '🔴 STOPPED'}\n"
+                            f"Balance:  <b>${bal:,.2f} USDT</b>\n"
+                            f"Leverage: {LEVERAGE}x\n"
+                            f"Risk:     {RISK_PERC*100:.0f}% per trade"
+                        )
+                    except Exception as e:
+                        send_telegram(f"⚠️ Status error: {e}")
+
+                elif text == "/balance":
+                    try:
+                        bal = get_balance()
+                        send_telegram(f"💼 Balance: <b>${bal:,.2f} USDT</b>")
+                    except Exception as e:
+                        send_telegram(f"⚠️ Balance error: {e}")
+
+                elif text == "/price":
+                    try:
+                        p = get_price("BTCUSDT")
+                        send_telegram(f"₿ BTC/USDT: <b>${p:,.2f}</b>")
+                    except Exception as e:
+                        send_telegram(f"⚠️ Price error: {e}")
+
+                elif text == "/stop":
+                    BOT_ACTIVE = False
+                    send_telegram("🔴 <b>Bot STOPPED</b>\nNo new trades will be placed.\nSend /start to resume.")
+
+        except Exception as e:
+            log.error(f"Telegram polling error: {e}")
+
+        time.sleep(2)
+
+# ─── FLASK APP ────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 
 @app.route("/webhook", methods=["POST"])
@@ -231,39 +270,65 @@ def webhook():
         data   = request.get_json(force=True)
         action = data.get("action", "").lower()
         symbol = data.get("symbol", "BTCUSDT").upper()
-        log.info(f"📡 {action.upper()} {symbol}")
+        price  = data.get("price", "?")
+        log.info(f"📡 Signal: {action.upper()} {symbol} @ {price}")
+
         if action not in ("buy", "sell"):
             return jsonify({"error": "unknown action"}), 400
         if is_duplicate(symbol, action):
             return jsonify({"status": "duplicate"}), 200
+
         result = execute_trade(symbol, action)
         return jsonify({"status": "ok", "result": result}), 200
+
     except requests.HTTPError as e:
         err = e.response.text
         send_telegram(f"❌ <b>Trade Failed</b>\n{err[:200]}")
         return jsonify({"error": err}), 500
     except Exception as e:
+        log.error(f"Webhook error: {e}", exc_info=True)
         send_telegram(f"❌ <b>Error</b>\n{str(e)[:200]}")
         return jsonify({"error": str(e)}), 500
 
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"status": "Bitunix Bot Running 🚀", "active": BOT_ACTIVE})
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat  = os.environ.get("TELEGRAM_CHAT_ID", "")
+    return jsonify({
+        "status"         : "running",
+        "bot_active"     : BOT_ACTIVE,
+        "telegram_token" : "SET" if token else "MISSING",
+        "telegram_chat"  : "SET" if chat else "MISSING",
+        "bitunix_key"    : "SET" if os.environ.get("BITUNIX_API_KEY") else "MISSING"
+    })
 
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "active": BOT_ACTIVE})
 
+@app.route("/test_telegram", methods=["GET"])
+def test_telegram():
+    """Test endpoint to check Telegram is working."""
+    result = send_telegram("🧪 Test message from Bitunix Bot!")
+    return jsonify({"sent": result})
+
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    # Log all env vars status (not values)
+    log.info("=" * 50)
     log.info("BITUNIX BOT STARTING ON RAILWAY 🚀")
-    send_telegram(
-        "🚀 <b>Bitunix Bot Started on Railway!</b>\n"
-        f"SL: {SL_PERC*100}% | TP: {SL_PERC*RR*100:.2f}%\n"
-        f"Leverage: {LEVERAGE}x | Risk: {RISK_PERC*100:.0f}%/trade\n"
-        "Send /help for commands"
-    )
-    threading.Thread(target=handle_telegram_commands, daemon=True).start()
+    log.info(f"BITUNIX_API_KEY:    {'SET ✅' if os.environ.get('BITUNIX_API_KEY') else 'MISSING ❌'}")
+    log.info(f"BITUNIX_SECRET_KEY: {'SET ✅' if os.environ.get('BITUNIX_SECRET_KEY') else 'MISSING ❌'}")
+    log.info(f"TELEGRAM_BOT_TOKEN: {'SET ✅' if os.environ.get('TELEGRAM_BOT_TOKEN') else 'MISSING ❌'}")
+    log.info(f"TELEGRAM_CHAT_ID:   {'SET ✅' if os.environ.get('TELEGRAM_CHAT_ID') else 'MISSING ❌'}")
+    log.info("=" * 50)
+
+    # Start Telegram polling in background thread
+    t = threading.Thread(target=telegram_polling, daemon=True)
+    t.start()
+    log.info("Telegram thread started!")
+
+    # Start Flask
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
-  
+    
