@@ -71,13 +71,33 @@ def make_headers(query="", body=""):
     }
 
 def get_balance():
-    r = requests.get(f"{BASE_URL}/api/v1/futures/account",
-                     headers=make_headers(), timeout=10)
-    r.raise_for_status()
-    for asset in r.json().get("data", {}).get("assets", []):
-        if asset.get("currency", "").upper() == "USDT":
-            return float(asset.get("available", 0))
-    return 0.0
+    try:
+        r = requests.get(
+            f"{BASE_URL}/api/v1/futures/account",
+            headers=make_headers(),
+            timeout=10
+        )
+        log.info(f"Balance raw: {r.status_code} {r.text}")
+        data = r.json()
+        # Try different response structures
+        if data.get("data") is None:
+            log.error(f"Full response: {data}")
+            return 0.0
+        inner = data.get("data", {})
+        # Structure 1: data.assets[]
+        assets = inner.get("assets", [])
+        # Structure 2: data directly has available
+        if not assets:
+            usdt = inner.get("available", None)
+            if usdt:
+                return float(usdt)
+        for a in assets:
+            if a.get("currency", "").upper() == "USDT":
+                return float(a.get("available", 0))
+        return 0.0
+    except Exception as e:
+        log.error(f"Balance error: {e}")
+        return 0.0
 
 def get_price(symbol):
     q = f"symbols={symbol}"
