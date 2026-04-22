@@ -120,8 +120,13 @@ def place_order(symbol, side, qty, tp, sl):
         "tpStopType": "MARK_PRICE", "slStopType": "MARK_PRICE",
         "clientId": uuid.uuid4().hex,
     }, separators=(",", ":"))
-    r = requests.post(f"{BASE_URL}/api/v1/futures/order/place_order",
-                      headers=_headers(body=body), data=body)
+    headers = _headers(body=body)
+    r = requests.post(
+        f"{BASE_URL}/api/v1/futures/order/place_order",
+        headers=headers,
+        data=body
+    )
+    log.info(f"Order response: {r.status_code} {r.text}")
     r.raise_for_status()
     return r.json()
 
