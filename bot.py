@@ -1,7 +1,6 @@
 """
 BITUNIX AI TRADING BOT + TELEGRAM
-Signature fix: query params sorted ASCII, concatenated as key+value (no = or &)
-Example: marginCoin=USDT -> sign uses "marginCoinUSDT"
+Fixed: place_order uses tradeSide=OPEN, removed effect field
 """
 import hashlib
 import json
@@ -10,7 +9,7 @@ import os
 import time
 import uuid
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 import requests
 from flask import Flask, request, jsonify
 
@@ -36,9 +35,8 @@ def sha256_hex(s):
 
 def build_query_string(params: dict) -> str:
     """
-    Bitunix requires query params sorted by key in ASCII order,
-    concatenated as key1value1key2value2 (NO = or & characters).
-    Example: {"marginCoin": "USDT"} -> "marginCoinUSDT"
+    Bitunix: sort params by key ASCII order,
+    concatenate as key1value1key2value2 (no = or &)
     """
     sorted_keys = sorted(params.keys())
     return "".join(k + str(params[k]) for k in sorted_keys)
@@ -87,14 +85,11 @@ def send_telegram(message):
 # ─── BITUNIX API ─────────────────────────────────────────────────────────────
 def get_balance():
     try:
-        params     = {"marginCoin": "USDT"}
-        query_str  = build_query_string(params)   # "marginCoinUSDT"
-        url_params = "marginCoin=USDT"            # actual URL query string
-
-        log.info(f"Balance sign query_str: '{query_str}'")
-
+        params    = {"marginCoin": "USDT"}
+        query_str = build_query_string(params)
+        url_q     = "marginCoin=USDT"
         r = requests.get(
-            f"{BASE_URL}/api/v1/futures/account?{url_params}",
+            f"{BASE_URL}/api/v1/futures/account?{url_q}",
             headers=make_headers(query_str=query_str),
             timeout=10
         )
@@ -111,7 +106,7 @@ def get_balance():
         for asset in inner.get("assets", []):
             if asset.get("currency", "").upper() == "USDT":
                 return float(asset.get("available", 0))
-        log.error(f"Balance fields not found in: {inner}")
+        log.error(f"Balance field not found in: {inner}")
         return 0.0
     except Exception as e:
         log.error(f"get_balance error: {e}")
@@ -120,9 +115,8 @@ def get_balance():
 def get_price(symbol):
     try:
         params    = {"symbols": symbol}
-        query_str = build_query_string(params)   # "symbolsBTCUSDT"
+        query_str = build_query_string(params)
         url_q     = f"symbols={symbol}"
-
         r = requests.get(
             f"{BASE_URL}/api/v1/futures/market/tickers?{url_q}",
             headers=make_headers(query_str=query_str),
@@ -152,12 +146,16 @@ def set_leverage(symbol, leverage):
         log.error(f"set_leverage error: {e}")
 
 def place_order(symbol, side, qty, tp, sl):
+    """
+    side = BUY or SELL
+    tradeSide = OPEN (opening new position)
+    """
     payload = {
         "symbol"    : symbol,
-        "side"      : side.upper(),
+        "side"      : side.upper(),       # BUY or SELL
+        "tradeSide" : "OPEN",             # OPEN new position
         "orderType" : "MARKET",
         "qty"       : str(round(qty, 6)),
-        "effect"    : "GTC",
         "tpPrice"   : str(round(tp, 2)),
         "slPrice"   : str(round(sl, 2)),
         "tpStopType": "MARK_PRICE",
@@ -221,6 +219,17 @@ def execute_trade(symbol, action):
     set_leverage(symbol, LEVERAGE)
     result = place_order(symbol, side, qty, tp, sl)
 
+    # Check if order was successful
+    if result.get("code") != 0:
+        error_msg = result.get("msg", "Unknown error")
+        log.error(f"Order failed: {error_msg}")
+        send_telegram(
+            f"❌ <b>Order Failed</b>\n"
+            f"{symbol} {side}\n"
+            f"Error: {error_msg}"
+        )
+        return result
+
     emoji = "🟢 BUY" if action == "buy" else "🔴 SELL"
     send_telegram(
         f"{emoji} <b>{symbol}</b>\n"
@@ -230,7 +239,7 @@ def execute_trade(symbol, action):
         f"🎯 TP:      <b>${tp:,.2f}</b>\n"
         f"🛑 SL:      <b>${sl:,.2f}</b>\n"
         f"💼 Balance: <b>${balance:,.2f} USDT</b>\n"
-        f"⏰ {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
+        f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
     )
     log.info(f"✅ Trade done: {side} {qty} {symbol} @ {price}")
     return result
@@ -386,4 +395,4 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
-
+                
