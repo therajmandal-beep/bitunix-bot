@@ -1,7 +1,7 @@
 """
 BITUNIX AI TRADING BOT + TELEGRAM
-Correct signature: SHA256(SHA256(nonce+ts+key+query+body) + secret)
-Balance fix: marginCoin=USDT query param included in signature
+Signature fix: query params sorted ASCII, concatenated as key+value (no = or &)
+Example: marginCoin=USDT -> sign uses "marginCoinUSDT"
 """
 import hashlib
 import json
@@ -34,16 +34,23 @@ log = logging.getLogger(__name__)
 def sha256_hex(s):
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
-def make_sign(nonce, ts, query="", body=""):
+def build_query_string(params: dict) -> str:
+    """
+    Bitunix requires query params sorted by key in ASCII order,
+    concatenated as key1value1key2value2 (NO = or & characters).
+    Example: {"marginCoin": "USDT"} -> "marginCoinUSDT"
+    """
+    sorted_keys = sorted(params.keys())
+    return "".join(k + str(params[k]) for k in sorted_keys)
+
+def make_sign(nonce, ts, query_str="", body=""):
     api_key    = os.environ.get("BITUNIX_API_KEY", "")
     secret_key = os.environ.get("BITUNIX_SECRET_KEY", "")
-    # Step 1: digest = SHA256(nonce + timestamp + api_key + queryParams + body)
-    digest = sha256_hex(nonce + ts + api_key + query + body)
-    # Step 2: sign = SHA256(digest + secretKey)
+    digest = sha256_hex(nonce + ts + api_key + query_str + body)
     sign   = sha256_hex(digest + secret_key)
     return sign
 
-def make_headers(query="", body=""):
+def make_headers(query_str="", body=""):
     api_key = os.environ.get("BITUNIX_API_KEY", "")
     nonce   = uuid.uuid4().hex[:32]
     ts      = str(int(time.time() * 1000))
@@ -51,7 +58,7 @@ def make_headers(query="", body=""):
         "api-key"      : api_key,
         "nonce"        : nonce,
         "timestamp"    : ts,
-        "sign"         : make_sign(nonce, ts, query, body),
+        "sign"         : make_sign(nonce, ts, query_str, body),
         "Content-Type" : "application/json"
     }
 
@@ -80,11 +87,15 @@ def send_telegram(message):
 # ─── BITUNIX API ─────────────────────────────────────────────────────────────
 def get_balance():
     try:
-        # marginCoin=USDT must be included in both URL and signature
-        q = "marginCoin=USDT"
+        params     = {"marginCoin": "USDT"}
+        query_str  = build_query_string(params)   # "marginCoinUSDT"
+        url_params = "marginCoin=USDT"            # actual URL query string
+
+        log.info(f"Balance sign query_str: '{query_str}'")
+
         r = requests.get(
-            f"{BASE_URL}/api/v1/futures/account?{q}",
-            headers=make_headers(query=q),
+            f"{BASE_URL}/api/v1/futures/account?{url_params}",
+            headers=make_headers(query_str=query_str),
             timeout=10
         )
         log.info(f"Balance response: {r.status_code} {r.text}")
@@ -93,16 +104,14 @@ def get_balance():
             log.error(f"Balance API error: {data.get('msg')}")
             return 0.0
         inner = data["data"]
-        # Try common field names for available balance
         for field in ["available", "availableBalance", "availableMargin"]:
             val = inner.get(field)
             if val is not None:
                 return float(val)
-        # Try nested assets list
         for asset in inner.get("assets", []):
             if asset.get("currency", "").upper() == "USDT":
                 return float(asset.get("available", 0))
-        log.error(f"Could not find balance in: {inner}")
+        log.error(f"Balance fields not found in: {inner}")
         return 0.0
     except Exception as e:
         log.error(f"get_balance error: {e}")
@@ -110,13 +119,16 @@ def get_balance():
 
 def get_price(symbol):
     try:
-        q = f"symbols={symbol}"
+        params    = {"symbols": symbol}
+        query_str = build_query_string(params)   # "symbolsBTCUSDT"
+        url_q     = f"symbols={symbol}"
+
         r = requests.get(
-            f"{BASE_URL}/api/v1/futures/market/tickers?{q}",
-            headers=make_headers(query=q),
+            f"{BASE_URL}/api/v1/futures/market/tickers?{url_q}",
+            headers=make_headers(query_str=query_str),
             timeout=10
         )
-        log.info(f"Price response: {r.status_code} {r.text}")
+        log.info(f"Price response: {r.status_code} {r.text[:200]}")
         data = r.json().get("data", [])
         if data:
             return float(data[0]["lastPrice"])
@@ -127,10 +139,8 @@ def get_price(symbol):
 
 def set_leverage(symbol, leverage):
     try:
-        body = json.dumps(
-            {"symbol": symbol, "leverage": leverage},
-            separators=(",", ":")
-        )
+        payload = {"symbol": symbol, "leverage": leverage}
+        body    = json.dumps(payload, separators=(",", ":"))
         r = requests.post(
             f"{BASE_URL}/api/v1/futures/account/change_leverage",
             headers=make_headers(body=body),
@@ -376,4 +386,4 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
-        
+
