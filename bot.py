@@ -1,6 +1,7 @@
 """
 BITUNIX AI TRADING BOT + TELEGRAM
-Fixed signature: SHA256(SHA256(nonce+ts+key+query+body) + secret)
+Correct signature: SHA256(SHA256(nonce+ts+key+query+body) + secret)
+Balance fix: marginCoin=USDT query param included in signature
 """
 import hashlib
 import json
@@ -79,9 +80,11 @@ def send_telegram(message):
 # ─── BITUNIX API ─────────────────────────────────────────────────────────────
 def get_balance():
     try:
+        # marginCoin=USDT must be included in both URL and signature
+        q = "marginCoin=USDT"
         r = requests.get(
-            f"{BASE_URL}/api/v1/futures/account",
-            headers=make_headers(),
+            f"{BASE_URL}/api/v1/futures/account?{q}",
+            headers=make_headers(query=q),
             timeout=10
         )
         log.info(f"Balance response: {r.status_code} {r.text}")
@@ -89,9 +92,17 @@ def get_balance():
         if data.get("data") is None:
             log.error(f"Balance API error: {data.get('msg')}")
             return 0.0
-        for asset in data["data"].get("assets", []):
+        inner = data["data"]
+        # Try common field names for available balance
+        for field in ["available", "availableBalance", "availableMargin"]:
+            val = inner.get(field)
+            if val is not None:
+                return float(val)
+        # Try nested assets list
+        for asset in inner.get("assets", []):
             if asset.get("currency", "").upper() == "USDT":
                 return float(asset.get("available", 0))
+        log.error(f"Could not find balance in: {inner}")
         return 0.0
     except Exception as e:
         log.error(f"get_balance error: {e}")
@@ -365,4 +376,4 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
-    
+        
