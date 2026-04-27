@@ -1,6 +1,8 @@
 """
 BITUNIX AI TRADING BOT + TELEGRAM
-Fixed: place_order uses tradeSide=OPEN, removed effect field
+- Time: IST (UTC+5:30)
+- Leverage: 20x
+- Risk: 20% per trade
 """
 import hashlib
 import json
@@ -9,7 +11,7 @@ import os
 import time
 import uuid
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import requests
 from flask import Flask, request, jsonify
 
@@ -17,9 +19,10 @@ from flask import Flask, request, jsonify
 BASE_URL   = "https://fapi.bitunix.com"
 SL_PERC    = 0.007
 RR         = 1.8
-LEVERAGE   = 10
-RISK_PERC  = 0.10
+LEVERAGE   = 20        # 20x leverage
+RISK_PERC  = 0.20      # 20% per trade
 BOT_ACTIVE = True
+IST        = timezone(timedelta(hours=5, minutes=30))
 
 # ─── LOGGING ─────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -34,10 +37,6 @@ def sha256_hex(s):
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 def build_query_string(params: dict) -> str:
-    """
-    Bitunix: sort params by key ASCII order,
-    concatenate as key1value1key2value2 (no = or &)
-    """
     sorted_keys = sorted(params.keys())
     return "".join(k + str(params[k]) for k in sorted_keys)
 
@@ -146,14 +145,10 @@ def set_leverage(symbol, leverage):
         log.error(f"set_leverage error: {e}")
 
 def place_order(symbol, side, qty, tp, sl):
-    """
-    side = BUY or SELL
-    tradeSide = OPEN (opening new position)
-    """
     payload = {
         "symbol"    : symbol,
-        "side"      : side.upper(),       # BUY or SELL
-        "tradeSide" : "OPEN",             # OPEN new position
+        "side"      : side.upper(),
+        "tradeSide" : "OPEN",
         "orderType" : "MARKET",
         "qty"       : str(round(qty, 6)),
         "tpPrice"   : str(round(tp, 2)),
@@ -219,7 +214,6 @@ def execute_trade(symbol, action):
     set_leverage(symbol, LEVERAGE)
     result = place_order(symbol, side, qty, tp, sl)
 
-    # Check if order was successful
     if result.get("code") != 0:
         error_msg = result.get("msg", "Unknown error")
         log.error(f"Order failed: {error_msg}")
@@ -230,6 +224,7 @@ def execute_trade(symbol, action):
         )
         return result
 
+    ist_time = datetime.now(IST).strftime('%d-%m-%Y %I:%M %p IST')
     emoji = "🟢 BUY" if action == "buy" else "🔴 SELL"
     send_telegram(
         f"{emoji} <b>{symbol}</b>\n"
@@ -239,7 +234,8 @@ def execute_trade(symbol, action):
         f"🎯 TP:      <b>${tp:,.2f}</b>\n"
         f"🛑 SL:      <b>${sl:,.2f}</b>\n"
         f"💼 Balance: <b>${balance:,.2f} USDT</b>\n"
-        f"⏰ {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+        f"⚡ Leverage: <b>{LEVERAGE}x</b>\n"
+        f"⏰ {ist_time}"
     )
     log.info(f"✅ Trade done: {side} {qty} {symbol} @ {price}")
     return result
@@ -296,14 +292,16 @@ def telegram_polling():
                     )
                 elif text == "/status":
                     try:
-                        bal = get_balance()
+                        bal      = get_balance()
+                        ist_time = datetime.now(IST).strftime('%d-%m-%Y %I:%M %p IST')
                         send_telegram(
                             f"🤖 <b>Bot Status</b>\n"
                             f"━━━━━━━━━━━━\n"
                             f"{'🟢 RUNNING' if BOT_ACTIVE else '🔴 STOPPED'}\n"
                             f"Balance:  <b>${bal:,.2f} USDT</b>\n"
-                            f"Leverage: {LEVERAGE}x\n"
-                            f"Risk:     {RISK_PERC*100:.0f}%/trade"
+                            f"Leverage: <b>{LEVERAGE}x</b>\n"
+                            f"Risk:     <b>{RISK_PERC*100:.0f}%/trade</b>\n"
+                            f"⏰ {ist_time}"
                         )
                     except Exception as e:
                         send_telegram(f"⚠️ Status error: {str(e)[:100]}")
@@ -353,6 +351,8 @@ def home():
     return jsonify({
         "status"      : "Bitunix Bot Running 🚀",
         "bot_active"  : BOT_ACTIVE,
+        "leverage"    : f"{LEVERAGE}x",
+        "risk"        : f"{RISK_PERC*100:.0f}%",
         "bitunix_key" : "SET ✅" if os.environ.get("BITUNIX_API_KEY") else "MISSING ❌",
         "tg_token"    : "SET ✅" if os.environ.get("TELEGRAM_BOT_TOKEN") else "MISSING ❌",
         "tg_chat"     : "SET ✅" if os.environ.get("TELEGRAM_CHAT_ID") else "MISSING ❌",
@@ -384,6 +384,8 @@ def test_price():
 if __name__ == "__main__":
     log.info("=" * 50)
     log.info("BITUNIX BOT STARTING 🚀")
+    log.info(f"LEVERAGE:           {LEVERAGE}x")
+    log.info(f"RISK PER TRADE:     {RISK_PERC*100:.0f}%")
     log.info(f"BITUNIX_API_KEY:    {'SET ✅' if os.environ.get('BITUNIX_API_KEY')    else 'MISSING ❌'}")
     log.info(f"BITUNIX_SECRET_KEY: {'SET ✅' if os.environ.get('BITUNIX_SECRET_KEY') else 'MISSING ❌'}")
     log.info(f"TELEGRAM_BOT_TOKEN: {'SET ✅' if os.environ.get('TELEGRAM_BOT_TOKEN') else 'MISSING ❌'}")
@@ -395,4 +397,3 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
-                
